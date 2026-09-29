@@ -1,0 +1,136 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><pre id="out"></pre>
+<script src="../js/util.js"></script>
+<script src="../js/assembler.js"></script>
+<script src="../js/decoder.js"></script>
+<script src="../js/cpu.js"></script>
+<script src="../js/bios.js"></script>
+<script src="../js/system.js"></script>
+<script src="../js/examples.js"></script>
+<script>
+const out = [];
+const log = (...a) => out.push(a.join(' '));
+const H = EMU.hex;
+try {
+  log('CP437 len', EMU.CP437.length, 'ñ=', EMU.toCP437('ñ'), '¡=', EMU.toCP437('¡'));
+  function screenText(cpu) {
+    const rows = [];
+    for (let r = 0; r < 25; r++) { let s = ''; for (let c = 0; c < 80; c++) s += EMU.charOf(cpu.mem[EMU.VIDEO_BASE + (r*80+c)*2]); rows.push(s.trimEnd()); }
+    return rows.map((s,i)=>s?`   [${i}] ${s}`:'').filter(Boolean).join('\n');
+  }
+  function runProgram(code, opts, maxSteps, keys) {
+    const sys = EMU.buildSystem(opts);
+    const src = sys ? [{name:'system', text: sys}, {name:'user', text: code}] : [{name:'user', text: code}];
+    const res = EMU.assemble(src);
+    if (!res.ok) { log('  ASM ERRORS:', JSON.stringify(res.errors.slice(0,8))); return null; }
+    // decoder consistency
+    let bad = 0;
+    for (const st of res.stmts) {
+      if (st.kind !== 'instr' || !st.bytes.length || (st.prefix && !st.mnem)) continue;
+      try {
+        const ins = EMU.decode(i => st.bytes[i] === undefined ? (()=>{throw 'short'})() : st.bytes[i], st.addr, st.bits === 32);
+        if (ins.len !== st.bytes.length) { bad++; if (bad < 6) log('  LEN MISMATCH', st.src, st.line, st.text.trim(), st.bytes.map(b=>H(b,2)).join(' '), 'dec', ins.len, EMU.formatIns(ins)); }
+      } catch (e) { bad++; if (bad < 6) log('  DECODE FAIL', st.src, st.line, st.text.trim(), st.bytes.map(b=>H(b,2)).join(' '), String(e && e.ud ? 'UD' : e)); }
+    }
+    const cpu = new EMU.CPU(); const bios = new EMU.Bios(cpu);
+    cpu.mem.fill(0); bios.install();
+    for (const [a,b] of res.image) cpu.mem[EMU.PROG_BASE + a] = b;
+    cpu.loadSeg(1, EMU.PROG_SEG); cpu.loadSeg(3, EMU.PROG_SEG); cpu.loadSeg(0, EMU.PROG_SEG); cpu.loadSeg(2, EMU.STACK_SEG);
+    cpu.setSP(0xFFFE); cpu.ip = sys ? 0 : res.entry; cpu.flags = 0x202;
+    (keys||[]).forEach(k => bios.pushKey(k.charCodeAt(0), 0));
+    let n = 0;
+    while (!cpu.halted && n < maxSteps) { cpu.step(); n++; if (cpu.waiting) { log('  waiting key at step', n); break; } }
+    return { cpu, res, n, bad };
+  }
+  for (const ex of EMU.EXAMPLES) {
+    log('=== ' + ex.title, JSON.stringify(ex.opts));
+    const r = runProgram(ex.code, ex.opts, 300000, ex.id === 'teclado' ? ['h','o','l','a','\r'] : []);
+    if (!r) continue;
+    const c = r.cpu;
+    log(`  steps=${r.n} halted=${c.halted} finished=${c.finished} shutdown=${c.shutdown} decodeBad=${r.bad} PE=${c.pe()} PG=${c.pg()}`);
+    log(`  AX=${H(c.r[0],8)} BX=${H(c.r[3],8)} CX=${H(c.r[1],8)} DX=${H(c.r[2],8)} SP=${H(c.sp(),4)} CS=${H(c.s[1].sel,4)} IP=${H(c.ip,4)} FL=${H(c.flags,4)}`);
+    const exc = c.log.filter(e => e.type === 'exc' || e.type === 'mode').slice(-6);
+    exc.forEach(e => log('  ev:', e.type, e.msg.slice(0, 190)));
+    const st = screenText(c); if (st) log(st);
+    if (ex.id === 'pg1') log('  phys30000=', H(c.pr16(0x30000),4), 'phys40000=', H(c.pr16(0x40000),4), 'phys41000=', H(c.pr16(0x41000),4));
+    if (ex.id === 'arreglo') { const t = r.res.symbols.find(s=>s.name==='total'), m = r.res.symbols.find(s=>s.name==='maximo'); log('  total=', c.pr16(EMU.PROG_BASE+t.value), 'max=', c.pr16(EMU.PROG_BASE+m.value)); }
+    if (ex.id === 'pila') { const t = r.res.symbols.find(s=>s.name==='resultado'); log('  resultado=', H(c.pr16(EMU.PROG_BASE+t.value),4)); }
+  }
+  // Exercise all switch combos with empty user program
+  for (const o of [{pm:true},{pm:true,idt:true},{pm:true,paging:true},{pm:true,idt:true,paging:true},
+                   {pm:true,b32:true},{pm:true,b32:true,idt:true},{pm:true,b32:true,paging:true},{pm:true,b32:true,idt:true,paging:true}]) {
+    const r = runProgram('        hlt\n', o, 100000);
+    if (r) log('combo', JSON.stringify(o), 'steps', r.n, 'halted', r.cpu.halted, 'shutdown', r.cpu.shutdown, 'PE', r.cpu.pe(), 'PG', r.cpu.pg(), 'bad', r.bad, 'size', r.res.maxAddr);
+  }
+  // ALU sanity tests
+  const t = runProgram(`
+        mov ax, 0FFFFh
+        add ax, 1
+        pushf
+        pop bx          ; flags after
+        mov al, 80h
+        sub al, 1       ; OF=1
+        mov cx, 1234h
+        rol cx, 4       ; 2341h
+        mov dx, 0
+        mov ax, 1000
+        mov si, 7
+        div si          ; ax=142 dx=6
+        mov di, ax
+        mov ax, -5
+        cwd
+        mov bp, 2
+        idiv bp         ; ax=-2 dx=-1
+        mov eax, 12345678h
+        shr eax, 8      ; 00123456
+        mov ebx, eax
+        imul cx, cx, 3  ; 2341*3 = 69C3
+        hlt`, {pm:false}, 1000);
+  const c = t.cpu;
+  log('ALU: BX(flags)=', H(c.r[3]&0xFFFF,4), 'CX=', H(c.r[1]&0xFFFF,4), 'DI=', c.r[7]&0xFFFF, 'AX=', H(c.r[0]&0xFFFF,4), 'DX=', H(c.r[2]&0xFFFF,4), 'EBX=', H(c.r[3],8));
+
+  // ---- codificación: comparar con los bytes que genera NASM ----
+  const ENC = [
+    [32, 'mov eax, [ebx+esi*4+8]', '8B 44 B3 08'], [32, 'mov eax, [esp]', '8B 04 24'], [32, 'mov eax, [ebp]', '8B 45 00'],
+    [32, 'add dword ptr [1000h], 5', '83 05 00 10 00 00 05'], [16, 'mov eax, [ebx+esi*4]', '66 67 8B 04 B3'],
+    [32, 'mov ax, bx', '66 89 D8'], [16, 'mov eax, ebx', '66 89 D8'], [32, 'push fs', '0F A0'], [32, 'pop gs', '0F A9'],
+    [32, 'movzx eax, byte ptr [ebx]', '0F B6 03'], [32, 'movsx ecx, dx', '0F BF CA'], [32, 'lea eax, [eax+eax*4]', '8D 04 80'],
+    [32, 'mov eax, [ecx*8+100h]', '8B 04 CD 00 01 00 00'], [32, 'sete al', '0F 94 C0'], [32, 'bt eax, 5', '0F BA E0 05'],
+    [32, 'bts [ebx], ecx', '0F AB 0B'], [32, 'bsf eax, ebx', '0F BC C3'], [32, 'shld eax, ebx, 4', '0F A4 D8 04'],
+    [32, 'shrd eax, ebx, cl', '0F AD D8'], [32, 'lfs esi, [ebx]', '0F B4 33'], [32, 'push 12345678h', '68 78 56 34 12'],
+    [32, 'mov word ptr fs:[edi], 1F41h', '66 64 C7 07 41 1F'], [32, 'iret', 'CF'], [16, 'iretd', '66 CF'], [32, 'pushad', '60'],
+    [32, 'stosd', 'AB'], [16, 'stosd', '66 AB'], [32, 'jecxz $', 'E3 FE'], [16, 'jecxz $', '67 E3 FD'], [32, 'mov fs, ax', '8E E0'],
+    [32, 'imul eax, [ebx+4], 10', '6B 43 04 0A'], [32, 'mov [ebx+esi], al', '88 04 33'],
+  ];
+  let encBad = 0;
+  for (const [bits, src, exp] of ENC) {
+    const r = EMU.assemble([{ name: 'user', text: src }], { bits });
+    const got = r.ok ? r.stmts.find(s => s.kind === 'instr').bytes.map(b => H(b, 2)).join(' ') : 'ERR ' + JSON.stringify(r.errors);
+    let back = '';
+    if (r.ok) { const by = r.stmts.find(s => s.kind === 'instr').bytes; try { const ins = EMU.decode(i => by[i], 0, bits === 32); back = EMU.formatIns(ins) + (ins.len !== by.length ? ' LEN!' : ''); } catch (e) { back = 'DECODE FAIL'; } }
+    if (got !== exp || back.includes('LEN') || back.includes('FAIL')) { encBad++; log('ENC MISMATCH', bits, src, 'got', got, 'exp', exp, back); }
+  }
+  log('encodings checked', ENC.length, 'bad', encBad);
+
+  // ---- semántica de las instrucciones del 386 ----
+  const t3 = runProgram(`
+        mov eax, 0F0h
+        movsx ebx, al         ; EBX = FFFFFFF0
+        movzx ecx, al         ; ECX = 000000F0
+        mov edx, 01101000b
+        bsf esi, edx          ; 3
+        bsr edi, edx          ; 6
+        bt edx, 5             ; CF=1
+        setc al               ; AL=1
+        mov ebp, 80000001h
+        shld ebp, edx, 4      ; EBP = 00000016
+        mov eax, 7
+        mov ecx, 3
+        mul ecx               ; 21
+        push eax
+        pop edx               ; EDX = 21
+        hlt`, {pm:false}, 100);
+  const k = t3.cpu;
+  log('386: EBX', H(k.r[3],8), 'ECX', H(k.r[1],8), 'ESI', k.r[6], 'EDI', k.r[7], 'EBP', H(k.r[5],8), 'EAX', H(k.r[0],8), 'EDX', H(k.r[2],8));
+} catch (e) { log('EXCEPTION', e.stack); }
+document.getElementById('out').textContent = out.join('\n');
+</script></body></html>

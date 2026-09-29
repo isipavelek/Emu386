@@ -1,0 +1,177 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><pre id="out"></pre>
+<script src="../js/util.js"></script><script src="../js/assembler.js"></script><script src="../js/decoder.js"></script>
+<script src="../js/cpu.js"></script><script src="../js/bios.js"></script><script src="../js/system.js"></script>
+<script src="../js/examples.js"></script><script src="../js/explain.js"></script><script src="../js/exercises.js"></script><script src="../js/tour.js"></script>
+<script>
+const out = []; const log = (...a) => out.push(a.join(' '));
+const SOL = {
+swap: `push ax
+push bx
+pop ax
+pop bx
+hlt`,
+suma3: `mov ax, [a]
+add ax, [b]
+add ax, [c]
+mov [total], ax
+hlt
+a dw 0
+b dw 0
+c dw 0
+total dw 0`,
+maximo: `mov si, offset arreglo
+mov cx, 8
+mov ax, [si]
+bucle: cmp [si], ax
+jle sig
+mov ax, [si]
+sig: add si, 2
+loop bucle
+mov [maximo], ax
+hlt
+arreglo dw 8 dup(0)
+maximo dw 0`,
+vocales: `mov si, offset texto
+xor bx, bx
+sig: lodsb
+or al, al
+jz fin
+or al, 20h
+cmp al, 'a'
+je voc
+cmp al, 'e'
+je voc
+cmp al, 'i'
+je voc
+cmp al, 'o'
+je voc
+cmp al, 'u'
+jne sig
+voc: inc bx
+jmp sig
+fin: mov [cantidad], bx
+hlt
+texto db 70 dup(0)
+cantidad dw 0`,
+mayus: `mov si, offset texto
+sig: mov al, [si]
+or al, al
+jz fin
+cmp al, 'a'
+jb nx
+cmp al, 'z'
+ja nx
+sub al, 32
+mov [si], al
+nx: inc si
+jmp sig
+fin: hlt
+texto db 60 dup(0)`,
+pantalla: `mov ax, 0B800h
+mov es, ax
+mov di, 820
+mov si, offset t
+mov ah, 1Eh
+mov cx, 5
+l: lodsb
+stosw
+loop l
+hlt
+t db 'ARQUI'`,
+factorial: `mov cx, [n]
+call factorial
+mov [resultado], ax
+hlt
+factorial: mov ax, 1
+jcxz fin
+bucle: mul cx
+loop bucle
+fin: ret
+n dw 5
+resultado dw 0`,
+int60: `xor ax, ax
+mov es, ax
+mov word ptr es:[60h*4], offset mi_int60
+mov word ptr es:[60h*4+2], cs
+mov bx, [x]
+mov cx, [y]
+int 60h
+mov [resultado], ax
+hlt
+mi_int60: mov ax, bx
+add ax, cx
+iret
+x dw 10
+y dw 20
+resultado dw 0`,
+pm_video: `mov ax, SEL_VIDEO
+mov es, ax
+mov word ptr es:[0], 4F50h
+mov word ptr es:[2], 4F4Dh
+hlt`,
+pm_desc: `mov cx, SEL_VIDEO
+lsl ax, cx
+mov dx, SEL_CODIGO
+lar bx, dx
+hlt`,
+pg_alias: `mov ax, SEL_VIRTUAL
+mov es, ax
+mov word ptr es:[0010h], 0CAFEh
+mov ax, es:[3010h]
+hlt`,
+dwords: `xor eax, eax
+xor esi, esi
+l: add eax, [valores + esi*4]
+inc esi
+cmp esi, 6
+jb l
+mov [suma], eax
+hlt
+valores dd 6 dup(0)
+suma dd 0`,
+pm32_plano: `mov edi, 0B8000h
+mov word ptr fs:[edi], 2F4Fh
+mov word ptr fs:[edi+2], 2F4Bh
+hlt`,
+pg_fault: `mov ax, SEL_VIRTUAL
+mov es, ax
+mov word ptr es:[7000h], 1234h
+mov eax, cr2
+mov [dir_falla], eax
+hlt
+dir_falla dd 0`,
+};
+try {
+  for (const ex of EMU.EXERCISES) {
+    const good = EMU.checkExercise(ex, SOL[ex.id] || '');
+    const bad = EMU.checkExercise(ex, ex.starter);
+    const fails = good.cases.flatMap(c => c.checks.filter(k => !k[0]).map(k => k[1]));
+    log((good.ok ? 'PASS' : 'FAIL').padEnd(5), ex.id.padEnd(10), 'solución:', good.ok, '| inicial rechazado:', !bad.ok, fails.length ? ' → ' + fails.slice(0, 3).join(' | ') : '');
+    if (!bad.ok) log('       starter msg:', bad.cases[0].checks.filter(k=>!k[0]).map(k=>k[1]).slice(0,2).join(' | '));
+  }
+  // explicación en todos los pasos de todos los ejemplos y tours
+  let nExp = 0, errs = 0;
+  const progs = EMU.EXAMPLES.map(e => [e.title, e.code, e.opts]).concat(EMU.TOURS.map(t => ['tour ' + t.id, t.code, t.opts]));
+  for (const [name, code, opts] of progs) {
+    const sys = EMU.buildSystem(opts);
+    const res = EMU.assemble(sys ? [{name:'system', text:sys},{name:'user', text:code}] : [{name:'user', text:code}]);
+    if (!res.ok) { log('ASM FAIL', name, JSON.stringify(res.errors)); continue; }
+    const cpu = new EMU.CPU(); cpu.tlbOn = name.includes('Paginación'); const bios = new EMU.Bios(cpu); bios.install();
+    for (const [a,b] of res.image) cpu.mem[EMU.PROG_BASE+a]=b;
+    cpu.loadSeg(1,0x1000);cpu.loadSeg(3,0x1000);cpu.loadSeg(0,0x1000);cpu.loadSeg(2,0x9000);cpu.setSP(0xFFFE);cpu.ip = sys?0:res.entry;
+    bios.pushKey(13,0);
+    for (let i=0;i<20000 && !cpu.halted;i++){ cpu.step(); try { EMU.explainStep(cpu.trace, cpu); nExp++; } catch(e){ errs++; if (errs<5) log('EXPLAIN ERR', name, EMU.formatIns(cpu.trace.ins||{op:'?',ops:[],seg:-1}), e.message); } }
+    if (name.includes('Paginación')) log('TLB', name, JSON.stringify(cpu.tlbStats), 'entries', cpu.tlb.size);
+    const tour = EMU.TOURS.find(t => 'tour ' + t.id === name);
+    if (tour) for (const st of tour.steps) if (st.at && !res.symbols.find(s => s.name.toLowerCase() === st.at.toLowerCase())) log('TOUR LABEL MISSING', tour.id, st.at);
+  }
+  log('explicaciones generadas:', nExp, 'errores:', errs);
+  // muestras de explicación
+  const res = EMU.assemble([{name:'user', text:'mov ax, 7\nadd ax, 0FFFFh\ncmp ax, 6\nje x\nx: shl ax, 3\nhlt'}]);
+  const cpu = new EMU.CPU(); const bios = new EMU.Bios(cpu); bios.install();
+  for (const [a,b] of res.image) cpu.mem[EMU.PROG_BASE+a]=b;
+  cpu.loadSeg(1,0x1000);cpu.loadSeg(3,0x1000);cpu.loadSeg(2,0x9000);cpu.setSP(0xFFFE);cpu.ip=0;
+  for (let i=0;i<5;i++){ cpu.step(); log('  >', EMU.explainStep(cpu.trace, cpu).replace(/<[^>]+>/g,'').replace(/\s+/g,' ').slice(0,260)); }
+} catch (e) { log('EXCEPTION', e.stack); }
+document.getElementById('out').textContent = out.join('\n');
+</script></body></html>

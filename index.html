@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EMU386 · Emulador didáctico</title>
+  <meta name="description" content="Emulador didáctico 8086/80386: assembly paso a paso, modo real, modo protegido de 16 y 32 bits, GDT, IDT y paginación.">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">386</span>
+      <div class="brand-txt"><b>EMU386</b><small>Emulador didáctico 8086 · 80386</small></div>
+    </div>
+
+    <div class="toolbar">
+      <button id="btnExercises" class="accent" title="Ejercicios con autocorrección">🎓 Ejercicios</button>
+      <button id="btnTour" class="accent" title="Recorridos guiados paso a paso">🧭 Tour guiado</button>
+      <select id="examples" title="Programas de ejemplo"></select>
+      <button id="btnNew" title="Programa nuevo">Nuevo</button>
+      <button id="btnOpen" title="Abrir un archivo .asm">Abrir</button>
+      <button id="btnSave" title="Descargar el programa (.asm)">Guardar</button>
+      <span class="sep"></span>
+      <button id="btnAssemble" class="primary" title="Ensamblar y cargar en memoria (Ctrl+B)">Ensamblar</button>
+      <button id="btnRun" title="Ejecutar hasta un punto de ruptura (F5)">▶ Ejecutar</button>
+      <button id="btnPause" title="Pausar">❚❚ Pausa</button>
+      <button id="btnStep" title="Ejecutar una instrucción (F8)">Paso <kbd>F8</kbd></button>
+      <button id="btnOver" title="Paso por encima: ejecuta CALL/INT/LOOP/REP completos (F10)">Paso por encima <kbd>F10</kbd></button>
+      <button id="btnBack" title="Deshacer la última instrucción (F7)">◀ Atrás <kbd>F7</kbd></button>
+      <button id="btnToUser" title="Ejecutar el código del sistema y detenerse en la 1ª instrucción del alumno">⤓ Ir al programa</button>
+      <button id="btnReset" title="Volver a cargar el programa y reiniciar el CPU">⟲ Reiniciar</button>
+      <label class="speed" title="Velocidad de ejecución">Velocidad
+        <input type="range" id="speed" min="0" max="5" value="4"><span id="speedLbl"></span>
+      </label>
+    </div>
+
+    <div class="switches">
+      <label class="switch" title="Genera la GDT y el código que pasa a modo protegido">
+        <input type="checkbox" id="swPM"><span class="knob"></span><span>Modo protegido <small>(GDT + salto)</small></span>
+      </label>
+      <label class="switch" title="El sistema salta a un segmento de código de 32 bits (D=1): el programa usa EAX, [EBX+ESI*4], EIP…">
+        <input type="checkbox" id="sw32"><span class="knob"></span><span>32 bits <small>(D=1)</small></span>
+      </label>
+      <label class="switch" title="Genera la IDT con manejadores de excepciones y el servicio INT 30h">
+        <input type="checkbox" id="swIDT"><span class="knob"></span><span>Interrupciones <small>(IDT)</small></span>
+      </label>
+      <label class="switch" title="Genera el directorio y las tablas de páginas y activa PG en CR0">
+        <input type="checkbox" id="swPG"><span class="knob"></span><span>Paginación <small>(CR3)</small></span>
+      </label>
+    </div>
+
+    <div class="status">
+      <span id="modeBadge" class="badge"></span>
+      <span id="stateBadge" class="badge"></span>
+      <span id="countBadge" class="badge dim"></span>
+      <button id="btnHelp" title="Ayuda">? Ayuda</button>
+      <button id="btnTheme" title="Tema claro / oscuro">◐</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ===================== Columna 1: código ===================== -->
+    <section class="col col-code">
+      <div class="panel ex-panel hidden" id="exPanel">
+        <div class="ex-head">
+          <span class="ex-badge" id="exLevel"></span><b id="exTitle"></b>
+          <span class="ex-actions">
+            <button id="exVerify" class="primary" title="Ejecuta su programa con varios casos de prueba">✔ Verificar</button>
+            <button id="exHint" title="Mostrar la siguiente pista">💡 Pista</button>
+            <button id="exToggle" title="Mostrar u ocultar la consigna">▾</button>
+            <button id="exClose" title="Salir del ejercicio">✕</button>
+          </span>
+        </div>
+        <div id="exBody" class="ex-body"></div>
+      </div>
+      <div class="panel editor-panel">
+        <div class="tabs" id="edTabs">
+          <button data-tab="user" class="active">Programa</button>
+          <button data-tab="system" id="tabSystem">Sistema <small>(generado)</small></button>
+          <button data-tab="listing">Listado</button>
+        </div>
+        <div class="tab-body">
+          <div id="edUser" class="editor-host"></div>
+          <div id="edSystem" class="editor-host hidden"></div>
+          <div id="listing" class="listing hidden"></div>
+        </div>
+        <div id="errors" class="errors hidden"></div>
+      </div>
+      <div class="panel" id="curPanel">
+        <div class="panel-title">Instrucción actual</div>
+        <div id="curInstr" class="cur-instr"></div>
+        <div class="panel-title sub">Qué hizo el último paso <span class="hint">(pase el mouse por las palabras subrayadas)</span></div>
+        <div id="lastStep" class="last-step"></div>
+      </div>
+    </section>
+
+    <!-- ===================== Columna 2: registros ===================== -->
+    <section class="col col-regs">
+      <div class="panel">
+        <div class="panel-title">Registros generales <span class="hint">(nombre = historial · valor = editar)</span></div>
+        <div id="regs"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Registros de <span class="gterm" data-g="segmento">segmento</span> <span class="hint">visible (<span class="gterm" data-g="selector">selector</span>) │ oculto (<span class="gterm" data-g="cache">caché del descriptor</span>)</span></div>
+        <div id="segs"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Registros de sistema y control</div>
+        <div id="sysregs"></div>
+      </div>
+    </section>
+
+    <!-- ===================== Columna 3: vistas ===================== -->
+    <section class="col col-views">
+      <div class="panel views-panel">
+        <div class="tabs" id="viewTabs">
+          <button data-view="xlate" class="active">Traducción</button>
+          <button data-view="mem">Memoria</button>
+          <button data-view="stack">Pila</button>
+          <button data-view="gdt">GDT</button>
+          <button data-view="idt">IDT / IVT</button>
+          <button data-view="paging">Paginación</button>
+          <button data-view="map">Mapa</button>
+          <button data-view="hist">Historial</button>
+        </div>
+        <div id="view" class="view"></div>
+      </div>
+      <div class="panel io-panel">
+        <div class="tabs" id="ioTabs">
+          <button data-io="screen" class="active">Pantalla 80×25</button>
+          <button data-io="events">Eventos <span id="evCount" class="pill"></span></button>
+        </div>
+        <div id="ioScreen" class="io-body">
+          <div class="screen-wrap">
+            <canvas id="screen" width="640" height="400" tabindex="0" title="Haga clic aquí para escribir con el teclado"></canvas>
+            <div id="kbdHint" class="kbd-hint hidden">⌨ El programa espera una tecla: haga clic en la pantalla y escriba</div>
+          </div>
+        </div>
+        <div id="ioEvents" class="io-body events hidden"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== Ayuda ===================== -->
+  <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <div class="modal-box">
+      <div class="modal-head"><b id="helpTitle">Ayuda de EMU386</b><button id="helpClose" aria-label="Cerrar">✕</button></div>
+      <div class="modal-body" id="helpBody"></div>
+    </div>
+  </div>
+  <!-- ===================== Selector de ejercicios / tours ===================== -->
+  <div id="pickModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pickTitle">
+    <div class="modal-box">
+      <div class="modal-head"><b id="pickTitle"></b><button id="pickClose" aria-label="Cerrar">✕</button></div>
+      <div class="modal-body" id="pickBody"></div>
+    </div>
+  </div>
+
+  <!-- ===================== Tarjeta del tour ===================== -->
+  <div id="tourCard" class="tour-card hidden" role="dialog" aria-labelledby="tourTitle">
+    <div class="tour-head"><span id="tourStepN" class="tour-n"></span><b id="tourTitle"></b></div>
+    <div id="tourBody" class="tour-body"></div>
+    <div class="tour-foot">
+      <button id="tourExit">Salir del tour</button>
+      <span class="tour-hint">F8 = ejecutar la instrucción marcada</span>
+      <button id="tourNext" class="primary">Siguiente ▶</button>
+    </div>
+  </div>
+
+  <div id="gloss" class="gloss hidden"></div>
+  <input type="file" id="fileInput" accept=".asm,.txt,.s,.inc" hidden>
+
+  <script src="js/util.js"></script>
+  <script src="js/assembler.js"></script>
+  <script src="js/decoder.js"></script>
+  <script src="js/cpu.js"></script>
+  <script src="js/bios.js"></script>
+  <script src="js/system.js"></script>
+  <script src="js/examples.js"></script>
+  <script src="js/explain.js"></script>
+  <script src="js/exercises.js"></script>
+  <script src="js/tour.js"></script>
+  <script src="js/help.js"></script>
+  <script src="js/editor.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>

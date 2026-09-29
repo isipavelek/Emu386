@@ -1,0 +1,44 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><pre id="out"></pre>
+<script src="../js/util.js"></script><script src="../js/assembler.js"></script><script src="../js/decoder.js"></script>
+<script src="../js/cpu.js"></script><script src="../js/bios.js"></script>
+<script>
+const out=[]; const log=(...a)=>out.push(a.join(' '));
+const cases = [
+ 'mov ds, 1000h', 'mov [bx], 5', 'mov ax, bl', 'jmp noexiste', 'mov [si], [di]', 'mov cs, ax', 'pop cs', 'mov ax, [ax]',
+ 'push al', 'foo ax, bx', 'loop lejos\n times 200 nop\nlejos: nop', "msg db 'sin cerrar", 'mov al, 300', 'x dw 1\nx dw 2', 'int 300', 'mov cr0, ax'];
+for (const c of cases) { const r = EMU.assemble([{name:'user', text:c}]); log(JSON.stringify(c).padEnd(40), r.ok ? 'OK (!!)' : r.errors.map(e=>'L'+e.line+': '+e.msg).join(' | ')); }
+// emu8086/MASM style
+const masm = `.model small
+.stack 100h
+.data
+msg db 'Hola MASM$'
+.code
+main proc
+    mov ax, @data
+    mov ds, ax
+    lea dx, msg
+    mov ah, 9
+    int 21h
+    mov ah, 4ch
+    int 21h
+main endp
+end main`;
+const com = `org 100h
+    mov ah, 9
+    mov dx, offset msg
+    int 21h
+    ret
+msg db "COM ok$"`;
+for (const [name, src] of [['masm', masm], ['com', com]]) {
+  const r = EMU.assemble([{name:'user', text:src}]);
+  if (!r.ok) { log(name, 'ERR', JSON.stringify(r.errors)); continue; }
+  const cpu = new EMU.CPU(); const bios = new EMU.Bios(cpu); bios.install();
+  for (const [a,b] of r.image) cpu.mem[EMU.PROG_BASE+a]=b;
+  if (r.minAddr >= 2) { cpu.mem[EMU.PROG_BASE]=0xCD; cpu.mem[EMU.PROG_BASE+1]=0x20; }
+  cpu.loadSeg(1,0x1000);cpu.loadSeg(3,0x1000);cpu.loadSeg(0,0x1000);cpu.loadSeg(2,0x9000);cpu.setSP(0xFFFE);cpu.ip=r.entry;
+  let n=0; while(!cpu.halted && n<1000){cpu.step();n++;}
+  let s=''; for(let i=0;i<30;i++) s+=EMU.charOf(cpu.mem[EMU.VIDEO_BASE+i*2]);
+  log(name, 'entry', EMU.hex(r.entry,4), 'steps', n, 'finished', cpu.finished, 'screen:', s.trim());
+}
+document.getElementById('out').textContent=out.join('\n');
+</script></body></html>
